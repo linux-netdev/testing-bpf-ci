@@ -465,7 +465,7 @@ static inline struct tb_service *tb_to_service(struct device *dev)
  */
 struct tb_service_driver {
 	struct device_driver driver;
-	int (*probe)(struct tb_service *svc, const struct tb_service_id *id);
+	int (*probe)(struct tb_service *svc);
 	void (*remove)(struct tb_service *svc);
 	void (*shutdown)(struct tb_service *svc);
 	const struct tb_service_id *id_table;
@@ -514,6 +514,11 @@ void tb_service_properties_changed(struct tb_service *svc);
  * @hop_count: Number of rings (end point hops) supported by NHI.
  * @quirks: NHI specific quirks if any
  * @domain_released: Completed when domain has been fully released
+ * @host_reset: Host router was reset on driver load, or forced on system
+ *		shutdown/reboot. When set, tb_stop() asserts DPR on connected
+ *		downstream ports to signal disconnect before tearing down the
+ *		router tree. Only Thunderbolt 3 devices are reset; USB4
+ *		routers are skipped.
  */
 struct tb_nhi {
 	spinlock_t lock;
@@ -528,6 +533,7 @@ struct tb_nhi {
 	u32 hop_count;
 	unsigned long quirks;
 	struct completion domain_released;
+	bool host_reset;
 };
 
 /**
@@ -546,6 +552,8 @@ struct tb_nhi {
  * @work: Interrupt work structure
  * @is_tx: Is the ring Tx or Rx
  * @running: Is the ring running
+ * @notify_pending: Controller has not been notified about the posted
+ *		    descriptors yet
  * @irq: MSI-X irq number if the ring uses MSI-X. %0 otherwise.
  * @vector: MSI-X vector number the ring uses (only set if @irq is > 0)
  * @flags: Ring specific flags
@@ -574,6 +582,7 @@ struct tb_ring {
 	struct work_struct work;
 	bool is_tx:1;
 	bool running:1;
+	bool notify_pending:1;
 	int irq;
 	u8 vector;
 	unsigned int flags;
@@ -592,6 +601,8 @@ struct tb_ring {
 #define RING_FLAG_FRAME		BIT(1)
 /* Enable end-to-end flow control */
 #define RING_FLAG_E2E		BIT(2)
+/* Do not enable interrupt for the ring */
+#define RING_FLAG_NO_INTERRUPT	BIT(3)
 
 struct ring_frame;
 typedef void (*ring_cb)(struct tb_ring *, struct ring_frame *, bool canceled);
@@ -661,7 +672,8 @@ bool tb_ring_flush(struct tb_ring *ring, unsigned int timeout_msec);
 void tb_ring_stop(struct tb_ring *ring);
 void tb_ring_free(struct tb_ring *ring);
 
-int __tb_ring_enqueue(struct tb_ring *ring, struct ring_frame *frame);
+int __tb_ring_enqueue(struct tb_ring *ring, struct ring_frame *frame, bool more);
+void tb_ring_notify(struct tb_ring *ring);
 
 /**
  * tb_ring_rx() - enqueue a frame on an RX ring
@@ -682,7 +694,24 @@ int __tb_ring_enqueue(struct tb_ring *ring, struct ring_frame *frame);
 static inline int tb_ring_rx(struct tb_ring *ring, struct ring_frame *frame)
 {
 	WARN_ON(ring->is_tx);
-	return __tb_ring_enqueue(ring, frame);
+	return __tb_ring_enqueue(ring, frame, false);
+}
+
+/**
+ * tb_ring_rx_more() - enqueue a frame on an RX ring without notifying
+ * @ring: Ring to enqueue the frame
+ * @frame: Frame to enqueue
+ *
+ * Same as tb_ring_rx() but does not notify the controller about the
+ * enqueued frame. The caller must call tb_ring_notify() once it is done
+ * enqueuing frames.
+ *
+ * Return: %-ESHUTDOWN if tb_ring_stop() has been called, %0 otherwise.
+ */
+static inline int tb_ring_rx_more(struct tb_ring *ring, struct ring_frame *frame)
+{
+	WARN_ON(ring->is_tx);
+	return __tb_ring_enqueue(ring, frame, true);
 }
 
 /**
@@ -703,7 +732,22 @@ static inline int tb_ring_rx(struct tb_ring *ring, struct ring_frame *frame)
 static inline int tb_ring_tx(struct tb_ring *ring, struct ring_frame *frame)
 {
 	WARN_ON(!ring->is_tx);
-	return __tb_ring_enqueue(ring, frame);
+	return __tb_ring_enqueue(ring, frame, false);
+}
+
+/**
+ * tb_ring_tx_more() - enqueue a frame on a TX ring without notifying
+ * @ring: Ring to enqueue the frame
+ * @frame: Frame to enqueue
+ *
+ * Same as tb_ring_rx_more() but for TX ring.
+ *
+ * Return: %-ESHUTDOWN if tb_ring_stop() has been called, %0 otherwise.
+ */
+static inline int tb_ring_tx_more(struct tb_ring *ring, struct ring_frame *frame)
+{
+	WARN_ON(!ring->is_tx);
+	return __tb_ring_enqueue(ring, frame, true);
 }
 
 /* Used only when the ring is in polling mode */

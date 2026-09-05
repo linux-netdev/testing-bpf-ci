@@ -540,11 +540,12 @@ static int tbnet_alloc_rx_buffers(struct tbnet *net, unsigned int nbuffers)
 		trace_tbnet_alloc_rx_frame(index, tf->page, dma_addr,
 					   DMA_FROM_DEVICE);
 
-		tb_ring_rx(ring->ring, &tf->frame);
+		tb_ring_rx_more(ring->ring, &tf->frame);
 
 		ring->prod++;
 	}
 
+	tb_ring_notify(ring->ring);
 	return 0;
 
 err_free:
@@ -904,17 +905,17 @@ static int tbnet_poll(struct napi_struct *napi, int budget)
 		       le32_to_cpu(net->rx_hdr.frame_count) - 1;
 
 		rx_packets++;
-		net->stats.rx_bytes += frame_size;
 
 		if (last) {
+			/* Before eth_type_trans() pulls the Ethernet header. */
+			net->stats.rx_packets++;
+			net->stats.rx_bytes += skb->len;
 			skb->protocol = eth_type_trans(skb, net->dev);
 			trace_tbnet_rx_skb(skb);
 			napi_gro_receive(&net->napi, skb);
 			net->skb = NULL;
 		}
 	}
-
-	net->stats.rx_packets += rx_packets;
 
 	if (cleaned_count)
 		tbnet_alloc_rx_buffers(net, cleaned_count);
@@ -1243,7 +1244,8 @@ static netdev_tx_t tbnet_start_xmit(struct sk_buff *skb,
 		goto err_drop;
 
 	for (i = 0; i < frame_index + 1; i++)
-		tb_ring_tx(net->tx_ring.ring, &frames[i]->frame);
+		tb_ring_tx_more(net->tx_ring.ring, &frames[i]->frame);
+	tb_ring_notify(net->tx_ring.ring);
 
 	if (net->svc->prtcstns & TBNET_MATCH_FRAGS_ID)
 		atomic_inc(&net->frame_id);
@@ -1362,7 +1364,7 @@ static void tbnet_generate_mac(struct net_device *dev)
 	dev->priv_flags |= IFF_LIVE_ADDR_CHANGE;
 }
 
-static int tbnet_probe(struct tb_service *svc, const struct tb_service_id *id)
+static int tbnet_probe(struct tb_service *svc)
 {
 	struct tb_xdomain *xd = tb_service_parent(svc);
 	struct net_device *dev;
@@ -1482,7 +1484,7 @@ static DEFINE_SIMPLE_DEV_PM_OPS(tbnet_pm_ops, tbnet_suspend, tbnet_resume);
 
 static const struct tb_service_id tbnet_ids[] = {
 	{ TB_SERVICE("network", 1) },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(tbsvc, tbnet_ids);
 

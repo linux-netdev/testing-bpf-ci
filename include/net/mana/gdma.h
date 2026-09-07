@@ -468,6 +468,21 @@ struct gdma_context {
 	/* Hardware communication channel (HWC) */
 	struct gdma_dev		hwc;
 
+	/* destroy_channel() waits here for all HWC senders to exit.
+	 * Lives on gc (not hwc) so wake_up() after the last sender's
+	 * atomic_dec doesn't dereference freed hwc memory.
+	 */
+	wait_queue_head_t	hwc_drain_waitq;
+
+	/* Serializes hwc.driver_data (the hw_channel_context pointer)
+	 * between the control-plane readers in mana_gd_send_request(),
+	 * mana_need_log() and mana_serv_reset() and the publish/clear in
+	 * mana_hwc_create_channel()/mana_hwc_destroy_channel().  All users
+	 * are control-plane (HWC commands sleep; reset runs on a workqueue),
+	 * so a plain spinlock -- not RCU -- is sufficient.
+	 */
+	spinlock_t		hwc_lock;
+
 	/* Azure network adapter */
 	struct gdma_dev		mana;
 
@@ -683,6 +698,9 @@ enum {
 /* Driver supports dynamic interrupt moderation - DIM */
 #define GDMA_DRV_CAP_FLAG_1_DYN_INTERRUPT_MODERATION BIT(28)
 
+/* Driver supports dynamic queue depth for HWC */
+#define GDMA_DRV_CAP_FLAG_1_DYN_HWC_QUEUE_DEPTH BIT(29)
+
 /* Driver supports non-contiguous queue buffers */
 #define GDMA_DRV_CAP_FLAG_1_NON_CONTIGUOUS_BUFFERS BIT(30)
 
@@ -701,6 +719,7 @@ enum {
 	 GDMA_DRV_CAP_FLAG_1_PROBE_RECOVERY | \
 	 GDMA_DRV_CAP_FLAG_1_HANDLE_STALL_SQ_RECOVERY | \
 	 GDMA_DRV_CAP_FLAG_1_HWC_TIMEOUT_RECOVERY | \
+	 GDMA_DRV_CAP_FLAG_1_DYN_HWC_QUEUE_DEPTH | \
 	 GDMA_DRV_CAP_FLAG_1_EQ_MSI_UNSHARE_MULTI_VPORT | \
 	 GDMA_DRV_CAP_FLAG_1_DYN_INTERRUPT_MODERATION | \
 	 GDMA_DRV_CAP_FLAG_1_NON_CONTIGUOUS_BUFFERS)

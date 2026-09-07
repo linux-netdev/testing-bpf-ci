@@ -341,7 +341,7 @@ static int nfc_llcp_wks_sap(const char *service_name, size_t service_name_len)
 {
 	int sap, num_wks;
 
-	pr_debug("%s\n", service_name);
+	pr_debug("%.*s\n", (int)service_name_len, service_name);
 
 	if (service_name == NULL)
 		return -EINVAL;
@@ -1077,6 +1077,12 @@ static void nfc_llcp_recv_hdlc(struct nfc_llcp_local *local,
 	ptype = nfc_llcp_ptype(skb);
 	dsap = nfc_llcp_dsap(skb);
 	ssap = nfc_llcp_ssap(skb);
+
+	if (skb->len < LLCP_HEADER_SIZE + LLCP_SEQUENCE_SIZE) {
+		nfc_llcp_send_dm(local, dsap, ssap, LLCP_DM_NOCONN);
+		return;
+	}
+
 	ns = nfc_llcp_ns(skb);
 	nr = nfc_llcp_nr(skb);
 
@@ -1254,6 +1260,10 @@ static void nfc_llcp_recv_dm(struct nfc_llcp_local *local,
 
 	dsap = nfc_llcp_dsap(skb);
 	ssap = nfc_llcp_ssap(skb);
+
+	if (skb->len < LLCP_HEADER_SIZE + 1)
+		return;
+
 	reason = skb->data[2];
 
 	pr_debug("%d %d reason %d\n", ssap, dsap, reason);

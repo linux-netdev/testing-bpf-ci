@@ -55,6 +55,10 @@
 #define DMA_NUM_APP_WORDS		5
 #define LEN_APP				4
 #define RX_BUF_NUM_DEFAULT		128
+/* Well above any legitimate TX completion delay, including the worst case
+ * allowed by the DMA interrupt coalescing settings.
+ */
+#define AXIENET_TX_TIMEOUT		(5 * HZ)
 
 /* Must be shorter than length of ethtool_drvinfo.driver field to fit */
 #define DRIVER_NAME		"xaxienet"
@@ -788,6 +792,13 @@ static int axienet_free_tx_chain(struct axienet_local *lp, u32 first_bd,
 	dma_addr_t phys;
 
 	for (i = 0; i < nr_bds; i++) {
+		/* A NAPI poll must not return more than its budget.  Stop on a
+		 * packet boundary once it is spent - cur_p->skb is only set on
+		 * a packet's last descriptor, so no packet is left half-freed.
+		 */
+		if (!force && packets >= budget)
+			break;
+
 		cur_p = &lp->tx_bd_v[(first_bd + i) % lp->tx_bd_num];
 		status = cur_p->status;
 
@@ -1884,6 +1895,30 @@ axienet_get_stats64(struct net_device *dev, struct rtnl_link_stats64 *stats)
 	} while (read_seqcount_retry(&lp->hw_stats_seqcount, start));
 }
 
+/**
+ * axienet_tx_timeout - Driver TX timeout callback
+ * @ndev:	Pointer to net_device structure
+ * @txqueue:	Index of the transmit queue that stalled
+ *
+ * Called by the netdev watchdog when a transmit queue has made no progress for
+ * @ndev->watchdog_timeo.  axienet_dma_err_handler() is the driver's only reset
+ * path, and it is otherwise scheduled solely from axienet_tx_irq() and
+ * axienet_rx_irq() - so a completion interrupt that is never delivered leaves
+ * the queue stopped with descriptors unreclaimed and no way back short of
+ * unloading the driver.  Schedule the reset from here as well, so a lost
+ * interrupt is recoverable.
+ *
+ * This runs from a timer, so it only queues the work; the reset itself happens
+ * in process context in axienet_dma_err_handler().
+ */
+static void axienet_tx_timeout(struct net_device *ndev, unsigned int txqueue)
+{
+	struct axienet_local *lp = netdev_priv(ndev);
+
+	netdev_err(ndev, "TX queue %u stalled, resetting DMA\n", txqueue);
+	schedule_work(&lp->dma_err_task);
+}
+
 static const struct net_device_ops axienet_netdev_ops = {
 	.ndo_open = axienet_open,
 	.ndo_stop = axienet_stop,
@@ -1894,6 +1929,7 @@ static const struct net_device_ops axienet_netdev_ops = {
 	.ndo_validate_addr = eth_validate_addr,
 	.ndo_eth_ioctl = axienet_ioctl,
 	.ndo_set_rx_mode = axienet_set_multicast_list,
+	.ndo_tx_timeout = axienet_tx_timeout,
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	.ndo_poll_controller = axienet_poll_controller,
 #endif
@@ -2971,10 +3007,16 @@ static int axienet_probe(struct platform_device *pdev)
 			dev_err(&pdev->dev, "could not map DMA regs\n");
 			return PTR_ERR(lp->dma_regs);
 		}
-		if (lp->rx_irq <= 0 || lp->tx_irq <= 0) {
+		if (!lp->rx_irq || !lp->tx_irq) {
 			dev_err(&pdev->dev, "could not determine irqs\n");
-			return -ENOMEM;
+			return -EINVAL;
 		}
+		if (lp->rx_irq < 0)
+			return lp->rx_irq;
+		if (lp->tx_irq < 0)
+			return lp->tx_irq;
+		if (lp->eth_irq < 0 && lp->eth_irq != -ENXIO)
+			return lp->eth_irq;
 
 		/* Reset core now that clocks are enabled, prior to accessing MDIO */
 		ret = __axienet_device_reset(lp);
@@ -3048,9 +3090,13 @@ static int axienet_probe(struct platform_device *pdev)
 	} else {
 		ndev->netdev_ops = &axienet_netdev_ops;
 		ndev->ethtool_ops = &axienet_ethtool_ops;
+		/* netdev_watchdog_up() only arms the TX watchdog when
+		 * .ndo_tx_timeout is set, which is the legacy DMA path alone.
+		 */
+		ndev->watchdog_timeo = AXIENET_TX_TIMEOUT;
 	}
 	/* Check for Ethernet core IRQ (optional) */
-	if (lp->eth_irq <= 0)
+	if (lp->eth_irq < 0)
 		dev_info(&pdev->dev, "Ethernet core IRQ not defined\n");
 
 	/* Retrieve the MAC address */

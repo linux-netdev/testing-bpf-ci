@@ -463,6 +463,8 @@ void tcp_init_sock(struct sock *sk)
 
 	tp->tsoffset = 0;
 	tp->rack.reo_wnd_steps = 1;
+	tp->ecn_mode = TCP_ECN_MODE_UNSPEC;
+	tp->ecn_option = TCP_ACCECN_OPTION_UNSPEC;
 
 	sk->sk_write_space = sk_stream_write_space;
 	sock_set_flag(sk, SOCK_USE_WRITE_QUEUE);
@@ -578,8 +580,13 @@ __poll_t tcp_poll(struct file *file, struct socket *sock, poll_table *wait)
 	 * blocking on fresh not-connected or disconnected socket. --ANK
 	 */
 	shutdown = READ_ONCE(sk->sk_shutdown);
-	if (shutdown == SHUTDOWN_MASK || state == TCP_CLOSE)
+	if (shutdown == SHUTDOWN_MASK || state == TCP_CLOSE) {
 		mask |= EPOLLHUP;
+		/* Coupled with smp_wmb() in tcp_done_with_error() to ensure
+		 * sk->sk_err is visible if socket closure was observed.
+		 */
+		smp_rmb();
+	}
 	if (shutdown & RCV_SHUTDOWN)
 		mask |= EPOLLIN | EPOLLRDNORM | EPOLLRDHUP;
 
@@ -626,8 +633,6 @@ __poll_t tcp_poll(struct file *file, struct socket *sock, poll_table *wait)
 		 */
 		mask |= EPOLLOUT | EPOLLWRNORM;
 	}
-	/* This barrier is coupled with smp_wmb() in tcp_done_with_error() */
-	smp_rmb();
 	if (READ_ONCE(sk->sk_err) ||
 	    !skb_queue_empty_lockless(&sk->sk_error_queue))
 		mask |= EPOLLERR;
@@ -843,7 +848,7 @@ ssize_t tcp_splice_read(struct socket *sock, loff_t *ppos,
 				break;
 			if (sock_flag(sk, SOCK_DONE))
 				break;
-			if (sk->sk_err) {
+			if (READ_ONCE(sk->sk_err)) {
 				ret = sock_error(sk);
 				break;
 			}
@@ -1169,8 +1174,7 @@ int tcp_sendmsg_locked(struct sock *sk, struct msghdr *msg, size_t size)
 			zc = MSG_SPLICE_PAGES;
 	}
 
-	if (!sockc_err && sockc.dmabuf_id &&
-	    (!(flags & MSG_ZEROCOPY) || !sock_flag(sk, SOCK_ZEROCOPY))) {
+	if (!sockc_err && sockc.dmabuf_id && (zc != MSG_ZEROCOPY || !binding)) {
 		err = -EINVAL;
 		goto out_err;
 	}
@@ -1228,7 +1232,7 @@ restart:
 	mss_now = tcp_send_mss(sk, &size_goal, flags);
 
 	err = -EPIPE;
-	if (sk->sk_err || (sk->sk_shutdown & SEND_SHUTDOWN))
+	if (READ_ONCE(sk->sk_err) || (sk->sk_shutdown & SEND_SHUTDOWN))
 		goto do_error;
 
 	while (msg_data_left(msg)) {
@@ -2760,7 +2764,7 @@ static int tcp_recvmsg_locked(struct sock *sk, struct msghdr *msg, size_t len,
 			if (sock_flag(sk, SOCK_DONE))
 				break;
 
-			if (sk->sk_err) {
+			if (READ_ONCE(sk->sk_err)) {
 				copied = sock_error(sk);
 				break;
 			}
@@ -4160,6 +4164,18 @@ ao_parse:
 		tcp_enable_tx_delay(sk, val);
 		WRITE_ONCE(tp->tcp_tx_delay, val);
 		break;
+	case TCP_ECN:
+		if (val != TCP_ECN_MODE_UNSPEC && (val < 0 || val > TCP_ECN_IN_ACCECN_OUT_NOECN))
+			err = -EINVAL;
+		else
+			WRITE_ONCE(tp->ecn_mode, val);
+		break;
+	case TCP_ECN_OPTION:
+		if (val != TCP_ACCECN_OPTION_UNSPEC && (val < 0 || val > TCP_ACCECN_OPTION_PERSIST))
+			err = -EINVAL;
+		else
+			WRITE_ONCE(tp->ecn_option, val);
+		break;
 	default:
 		err = -ENOPROTOOPT;
 		break;
@@ -4842,6 +4858,12 @@ zerocopy_rcv_out:
 	case TCP_DELACK_MAX_US:
 		val = jiffies_to_usecs(READ_ONCE(inet_csk(sk)->icsk_delack_max));
 		break;
+	case TCP_ECN:
+		val = READ_ONCE(tp->ecn_mode);
+		break;
+	case TCP_ECN_OPTION:
+		val = READ_ONCE(tp->ecn_option);
+		break;
 	default:
 		return -ENOPROTOOPT;
 	}
@@ -5256,6 +5278,8 @@ static void __init tcp_struct_check(void)
 	CACHELINE_ASSERT_GROUP_MEMBER(struct tcp_sock, tcp_sock_write_tx, tsorted_sent_queue);
 	CACHELINE_ASSERT_GROUP_MEMBER(struct tcp_sock, tcp_sock_write_tx, highest_sack);
 	CACHELINE_ASSERT_GROUP_MEMBER(struct tcp_sock, tcp_sock_write_tx, ecn_flags);
+	CACHELINE_ASSERT_GROUP_MEMBER(struct tcp_sock, tcp_sock_write_tx, ecn_mode);
+	CACHELINE_ASSERT_GROUP_MEMBER(struct tcp_sock, tcp_sock_write_tx, ecn_option);
 
 	/* TXRX read-write hotpath cache lines */
 	CACHELINE_ASSERT_GROUP_MEMBER(struct tcp_sock, tcp_sock_write_txrx, pred_flags);

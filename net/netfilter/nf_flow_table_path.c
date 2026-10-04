@@ -84,6 +84,8 @@ out:
 
 struct nft_forward_info {
 	const struct net_device *dev;
+	u32 upper_ifidx[NF_FLOW_TABLE_UPPER_MAX];
+	u8 num_uppers;
 	struct id {
 		__u16	id;
 		__be16	proto;
@@ -190,6 +192,10 @@ static int nft_dev_path_info(struct net_device_path_stack *stack,
 		}
 	}
 
+	for (i = 0; info->dev && stack->path[i].dev != info->dev; i++)
+		info->upper_ifidx[i] = stack->path[i].dev->ifindex;
+	info->num_uppers = i;
+
 	if (nf_flowtable_hw_offload(&ft->data) &&
 	    nft_is_valid_ether_device(info->dev))
 		info->xmit_type = FLOW_OFFLOAD_XMIT_DIRECT;
@@ -256,6 +262,9 @@ static int nft_dev_forward_path(const struct nft_pktinfo *pkt,
 
 	route->tuple[!dir].in.num_encaps = info.num_encaps;
 	route->tuple[!dir].in.ingress_vlans = info.ingress_vlans;
+	memcpy(route->tuple[!dir].in.upper_ifidx, info.upper_ifidx,
+	       sizeof(info.upper_ifidx));
+	route->tuple[!dir].in.num_uppers = info.num_uppers;
 
 	if (info.xmit_type == FLOW_OFFLOAD_XMIT_DIRECT) {
 		memcpy(route->tuple[dir].out.h_source, info.h_source, ETH_ALEN);

@@ -122,6 +122,9 @@ static int flow_offload_fill_route(struct flow_offload *flow,
 
 	flow_tuple->tun = route->tuple[dir].in.tun;
 	flow_tuple->encap_num = route->tuple[dir].in.num_encaps;
+	memcpy(flow_tuple->upper_ifidx, route->tuple[dir].in.upper_ifidx,
+	       sizeof(flow_tuple->upper_ifidx));
+	flow_tuple->num_uppers = route->tuple[dir].in.num_uppers;
 	flow_tuple->needs_gso_segment = route->tuple[dir].out.needs_gso_segment;
 	flow_tuple->tun_num = route->tuple[dir].in.num_tuns;
 
@@ -224,6 +227,11 @@ static void flow_offload_fixup_ct(struct flow_offload *flow)
 			tcp_state = READ_ONCE(ct->proto.tcp.state);
 			flow_offload_fixup_tcp(ct, tcp_state);
 			timeout = READ_ONCE(tn->timeouts[tcp_state]);
+			if (nf_conntrack_tcp_unreplied(ct)) {
+				u32 unack = READ_ONCE(tn->timeouts[TCP_CONNTRACK_UNACK]);
+
+				timeout = min_t(s32, timeout, unack);
+			}
 			expired = nf_flow_has_expired(flow);
 		}
 		offload_timeout = READ_ONCE(tn->offload_timeout);
@@ -742,14 +750,9 @@ static void nf_flow_table_do_cleanup(struct nf_flowtable *flow_table,
 {
 	struct net_device *dev = data;
 
-	if (!dev) {
-		flow_offload_teardown(flow);
-		return;
-	}
-
-	if (net_eq(nf_ct_net(flow->ct), dev_net(dev)) &&
-	    (flow->tuplehash[0].tuple.iifidx == dev->ifindex ||
-	     flow->tuplehash[1].tuple.iifidx == dev->ifindex))
+	if (!dev ||
+	    flow->tuplehash[0].tuple.iifidx == dev->ifindex ||
+	    flow->tuplehash[1].tuple.iifidx == dev->ifindex)
 		flow_offload_teardown(flow);
 }
 
@@ -766,8 +769,10 @@ void nf_flow_table_cleanup(struct net_device *dev)
 	struct nf_flowtable *flowtable;
 
 	mutex_lock(&flowtable_lock);
-	list_for_each_entry(flowtable, &flowtables, list)
-		nf_flow_table_gc_cleanup(flowtable, dev);
+	list_for_each_entry(flowtable, &flowtables, list) {
+		if (net_eq(read_pnet(&flowtable->net), dev_net(dev)))
+			nf_flow_table_gc_cleanup(flowtable, dev);
+	}
 	mutex_unlock(&flowtable_lock);
 }
 EXPORT_SYMBOL_GPL(nf_flow_table_cleanup);

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
+amt_gso
 bind_bhash
 bind_timewait
 bind_wildcard
@@ -41,6 +42,7 @@ skf_net_off
 socket
 so_incoming_cpu
 so_netns_cookie
+so_reserve_mem
 so_rcv_listener
 stress_reuseport_listen
 tap

@@ -231,6 +231,31 @@ vlan_dev_get_egress_qos_mask(struct net_device *dev, u32 skprio)
 	return vlan_qos;
 }
 
+static inline void vlan_dev_sw_netstats_rx_add(struct net_device *dev,
+					       unsigned int len)
+{
+	struct vlan_pcpu_stats *stats;
+
+	stats = this_cpu_ptr(vlan_dev_priv(dev)->vlan_pcpu_stats);
+	u64_stats_update_begin(&stats->syncp);
+	u64_stats_inc(&stats->rx_packets);
+	u64_stats_add(&stats->rx_bytes, len);
+	u64_stats_update_end(&stats->syncp);
+}
+
+static inline void vlan_dev_sw_netstats_tx_add(struct net_device *dev,
+					       unsigned int packets,
+					       unsigned int len)
+{
+	struct vlan_pcpu_stats *stats;
+
+	stats = this_cpu_ptr(vlan_dev_priv(dev)->vlan_pcpu_stats);
+	u64_stats_update_begin(&stats->syncp);
+	u64_stats_add(&stats->tx_packets, packets);
+	u64_stats_add(&stats->tx_bytes, len);
+	u64_stats_update_end(&stats->syncp);
+}
+
 extern bool vlan_do_receive(struct sk_buff **skb);
 
 extern int vlan_vid_add(struct net_device *dev, __be16 proto, u16 vid);
@@ -247,6 +272,17 @@ extern bool vlan_uses_dev(const struct net_device *dev);
 static inline bool is_vlan_dev(const struct net_device *dev)
 {
 	return false;
+}
+
+static inline void vlan_dev_sw_netstats_rx_add(struct net_device *dev,
+					       unsigned int len)
+{
+}
+
+static inline void vlan_dev_sw_netstats_tx_add(struct net_device *dev,
+					       unsigned int packets,
+					       unsigned int len)
+{
 }
 
 static inline struct net_device *
@@ -698,7 +734,6 @@ static inline void vlan_set_encap_proto(struct sk_buff *skb,
 					struct vlan_hdr *vhdr)
 {
 	__be16 proto;
-	unsigned short *rawp;
 
 	/*
 	 * Was a VLAN packet, grab the encapsulated protocol, which the layer
@@ -711,21 +746,8 @@ static inline void vlan_set_encap_proto(struct sk_buff *skb,
 		return;
 	}
 
-	rawp = (unsigned short *)(vhdr + 1);
-	if (*rawp == 0xFFFF)
-		/*
-		 * This is a magic hack to spot IPX packets. Older Novell
-		 * breaks the protocol design and runs IPX over 802.3 without
-		 * an 802.2 LLC layer. We look for FFFF which isn't a used
-		 * 802.2 SSAP/DSAP. This won't work for fault tolerant netware
-		 * but does for the rest.
-		 */
-		skb->protocol = htons(ETH_P_802_3);
-	else
-		/*
-		 * Real 802.2 LLC
-		 */
-		skb->protocol = htons(ETH_P_802_2);
+	/* No ethertype: this is an 802.2 LLC frame (length field). */
+	skb->protocol = htons(ETH_P_802_2);
 }
 
 /**

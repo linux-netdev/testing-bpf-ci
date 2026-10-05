@@ -358,6 +358,10 @@ struct sk_buff;
  */
 #define GSO_BY_FRAGS	0xFFFF
 
+/* All fragments in an skb (skb_shinfo(skb)->frags[]) must be backed by
+ * netmems of the same memory type. Mixing fragments of different memory types
+ * within a single skb (including via skb coalescing) is not allowed.
+ */
 typedef struct skb_frag {
 	netmem_ref netmem;
 	unsigned int len;
@@ -3816,9 +3820,12 @@ static inline dma_addr_t __skb_frag_dma_map(struct device *dev,
 					    size_t offset, size_t size,
 					    enum dma_data_direction dir)
 {
+	dma_addr_t addr;
+
 	if (skb_frag_is_net_iov(frag)) {
-		return netmem_to_net_iov(frag->netmem)->desc.dma_addr +
-		       offset + frag->offset;
+		addr = netmem_dma_addr_decode(
+			netmem_get_dma_addr(frag->netmem));
+		return addr + offset + frag->offset;
 	}
 	return dma_map_page(dev, skb_frag_page(frag),
 			    skb_frag_off(frag) + offset, size, dir);

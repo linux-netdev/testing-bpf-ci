@@ -276,6 +276,15 @@ config INTEL_XWAY_PHY
 	  PEF 7061, PEF 7071 and PEF 7072 or integrated into the Intel
 	  SoCs xRX200, xRX300, xRX330, xRX350 and xRX550.
 
+config JLSEMI_PHY
+	tristate "JLSemi Ethernet PHYs"
+	help
+	  Supports the JLSemi Gigabit Ethernet PHYs, including the
+	  JL2121 and JL2101 models found on embedded system carrier boards
+	  and single-board computers.
+
+	  If unsure, say N.
+
 config LSI_ET1011C_PHY
 	tristate "LSI ET1011C PHY"
 	help

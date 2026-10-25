@@ -1745,6 +1745,18 @@ static void pipapo_gc_scan(struct nft_set *set, struct nft_pipapo_match *m)
 		i--;
 		e = f->mt[rulemap[i].to].e;
 
+		/* Skip entries not fully active in both generations: these are
+		 * elements inserted by the transaction currently being
+		 * committed, since nft_set_commit_update() runs the set .commit
+		 * callback before NEWSETELEM activation.  Collecting such an
+		 * element here lets synchronous gc free it before
+		 * nft_setelem_activate() runs on it, causing a use-after-free.
+		 */
+		if (!nft_set_elem_active(&e->ext, NFT_GENMASK_ANY)) {
+			first_rule += rules_f0;
+			continue;
+		}
+
 		/* synchronous gc never fails, there is no need to set on
 		 * NFT_SET_ELEM_DEAD_BIT.
 		 */
